@@ -1,0 +1,661 @@
+---
+title: "PERMDISP"
+output: html_document
+date: "2025-02-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readxl)
+library(nlme)
+library(car)
+library(vegan)
+library(reshape2)
+library(rstatix)
+library(ggplot2)
+library(gt)
+knitr::opts_knit$set(root.dir = "C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/GLS_PERMDISP")
+```
+
+**2024 SUBPERIOD 1**
+
+**Setup and GLS**
+
+*Daily mean*
+```{r}
+# Load dataset
+sub24.1 <- read_excel("C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/GLS_PERMDISP/Outlets_before8_1_2024.xlsx")
+
+# Ensure date and site are properly formatted
+sub24.1 <- sub24.1 %>%
+  mutate(
+    date = as.Date(date),
+    site = as.factor(site)
+  )
+
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.1_mn_model <- gls(
+  daily_mean ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.1,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.1_mn_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.1$MeanTemp_resid <- residuals(sub24.1_mn_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.1$MeanTemp_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_mean ~ Elevation + SiteAreaKm2 + tmean, data = sub24.1)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp)
+```
+
+*Daily max*
+```{r}
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.1_mx_model <- gls(
+  daily_max ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.1,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.1_mx_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.1$MaxTemp_resid <- residuals(sub24.1_mx_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.1$MaxTemp_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_max ~ Elevation + SiteAreaKm2 + tmean, data = sub24.1)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp)  
+```
+
+*Daily range*
+```{r}
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.1_rg_model <- gls(
+  daily_range ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.1,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.1_rg_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.1$DailyRange_resid <- residuals(sub24.1_rg_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.1$DailyRange_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_range ~ Elevation + SiteAreaKm2 + tmean, data = sub24.1)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp)  
+```
+
+**Run PERMDIST with residuals and visualize variability**
+```{r}
+# Create response matrix with residuals
+response_resid_matrix <- as.matrix(sub24.1[, c("MeanTemp_resid", "MaxTemp_resid", "DailyRange_resid")])
+response_resid_matrix <- scale(response_resid_matrix)  
+
+# Compute Euclidean distance matrix
+dist_matrix_resid <- vegdist(response_resid_matrix, method = "euclidean")
+
+# Run PERMDISP to assess site-level temperature variability
+permdisp_resid <- betadisper(dist_matrix_resid, sub24.1$site)
+
+# Plot variability by site
+boxplot(permdisp_resid, main="Site-Level Thermal Variability (Early Summer 2024)",
+        ylab="Distance to Centroid", xlab="Site")
+```
+
+**Perform Permutation Test to determine if sites differ significantly**
+```{r}
+# Perform permutation test to see if sites differ significantly in variability
+permdisp_test <- permutest(permdisp_resid, permutations = 999)
+
+# Print results
+print(permdisp_test)
+```
+
+**Build heatmap showing pairwise differences**
+```{r}
+# Ensure Site is a factor
+df_dispersion <- data.frame(Site = as.factor(sub24.1$site), Dispersion = permdisp_resid$distances)
+
+# Run pairwise Wilcoxon test with Bonferroni correction
+pairwise_dispersion_test <- df_dispersion %>%
+  pairwise_wilcox_test(Dispersion ~ Site, p.adjust.method = "bonferroni")
+
+# Add significance stars
+pairwise_dispersion_test <- pairwise_dispersion_test %>%
+  mutate(Significance = case_when(
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    TRUE      ~ ""
+  ))
+
+# Convert to wide matrix format for heatmap
+heatmap_matrix <- dcast(pairwise_dispersion_test, group1 ~ group2, value.var = "p")
+rownames(heatmap_matrix) <- heatmap_matrix$group1
+heatmap_matrix <- heatmap_matrix[, -1] 
+
+# Fill NA values (diagonal) with 1
+heatmap_matrix[is.na(heatmap_matrix)] <- 1
+
+# Melt into long format for ggplot
+heatmap_melted <- melt(as.matrix(heatmap_matrix), na.rm = TRUE)
+colnames(heatmap_melted) <- c("Site1", "Site2", "p_value")
+
+# Add significance stars to the melted data
+heatmap_melted <- heatmap_melted %>%
+  left_join(pairwise_dispersion_test, by = c("Site1" = "group1", "Site2" = "group2"))
+
+ggplot(heatmap_melted, aes(x = Site1, y = Site2, fill = p_value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Significance), color = "black", size = 5) + 
+  scale_fill_gradient(low = "red4", high = "white", limits = c(0, 1)) +
+  labs(title = "Pairwise Site Variability Differences (Early Summer 2024)",
+       x = "Site",
+       y = "Site",
+       fill = "p-value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+*Pairwise plot for Sub1*
+```{r}
+# Prepare data
+df_dispersion <- data.frame(Site = as.factor(sub24.1$site), Dispersion = permdisp_resid$distances)
+
+pairwise_dispersion_test <- df_dispersion %>%
+  pairwise_wilcox_test(Dispersion ~ Site, p.adjust.method = "bonferroni")
+
+# Assign significance levels 
+pairwise_dispersion_test <- pairwise_dispersion_test %>%
+  mutate(significance_level = case_when(
+    p < 0.001 ~ "< 0.001",
+    p < 0.01  ~ "< 0.01",
+    p < 0.05  ~ "< 0.05",
+    TRUE      ~ NA_character_
+  ))
+
+# Create symmetric matrix of p-values
+all_sites <- sort(unique(c(pairwise_dispersion_test$group1, pairwise_dispersion_test$group2)))
+
+# Full grid for melting (to ensure upper triangle plotting)
+grid <- expand.grid(Site1 = all_sites, Site2 = all_sites) %>%
+  filter(as.character(Site1) < as.character(Site2))  # upper triangle only
+
+# Join p-values and significance
+heatmap_data <- grid %>%
+  left_join(pairwise_dispersion_test, by = c("Site1" = "group1", "Site2" = "group2"))
+
+# Plot
+ggplot(heatmap_data, aes(x = Site1, y = Site2, fill = significance_level)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(
+    values = c(
+      "< 0.001" = "#990000",
+      "< 0.01"  = "#cc4c4c",
+      "< 0.05"  = "#e6b0b0"
+    ),
+    na.value = "white",  # Non-significant = blank
+    drop = FALSE
+  ) +
+  labs(
+    title = "Pairwise Site Variability Differences (Early Summer 2024)",
+    x = "Site",
+    y = "Site",
+    fill = "p-value"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+*Pairwise table*
+```{r}
+# Create table
+pairwise_dispersion_test %>%
+  gt() %>%
+  tab_header(title = "Early Summer 2024 Pairwise PERMDISP p-values",
+             subtitle = "Lower values indicate significant differences") %>%
+  fmt_number(columns = everything(), decimals = 3)
+```
+
+*Site dispersion table*
+```{r}
+# Extract PERMDISP site-level dispersion values
+site_dispersion <- data.frame(Site = permdisp_resid$group,
+                              Dispersion = permdisp_resid$distances)
+
+# Summarize by site: mean and standard deviation
+site_dispersion <- site_dispersion %>%
+  group_by(Site) %>%
+  summarise(
+    Mean_Dispersion = mean(Dispersion, na.rm = TRUE),
+    SD_Dispersion = sd(Dispersion, na.rm = TRUE)
+  )
+
+# Print the output to check
+print(site_dispersion)
+```
+
+**2024 SUBPERIOD 2**
+
+**Setup and GLS**
+
+*Daily mean*
+```{r}
+# Load dataset
+sub24.2 <- read_excel("C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/GLS_PERMDISP/Outlets_after8_1_2024.xlsx")
+
+# Ensure date and site are properly formatted
+sub24.2 <- sub24.2 %>%
+  mutate(
+    date = as.Date(date),
+    site = as.factor(site)
+  )
+
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.2_mn_model <- gls(
+  daily_mean ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.2,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.2_mn_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.2$MeanTemp_resid <- residuals(sub24.2_mn_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.2$MeanTemp_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_mean ~ Elevation + SiteAreaKm2 + tmean, data = sub24.2)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp)  
+```
+
+*Daily max*
+```{r}
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.2_mx_model <- gls(
+  daily_max ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.2,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.2_mx_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.2$MaxTemp_resid <- residuals(sub24.2_mx_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.2$MaxTemp_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_max ~ Elevation + SiteAreaKm2 + tmean, data = sub24.2)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp)  
+```
+
+*Daily range*
+```{r}
+# Fit GLS model with AR(1) autocorrelation grouped by site
+sub24.2_rg_model <- gls(
+  daily_range ~ Elevation + SiteAreaKm2 + tmean,
+  data = sub24.2,
+  correlation = corAR1(form = ~ date | site),
+  method = "ML"
+)
+
+# View model summary
+summary(sub24.2_rg_model)
+
+# Extract normalized residuals and add to dataframe
+sub24.2$DailyRange_resid <- residuals(sub24.2_rg_model, type = "normalized")
+
+# Plot autocorrelation of residuals
+acf(sub24.2$DailyRange_resid, main = "ACF of GLS Normalized Residuals")
+
+# Check VIF using standard lm 
+lm_temp <- lm(daily_range ~ Elevation + SiteAreaKm2 + tmean, data = sub24.2)
+vif(lm_temp)
+
+# Visualize residuals
+par(mfrow = c(2, 2))
+plot(lm_temp) 
+```
+
+**Creating model summary table**
+```{r}
+# Define manual R2 function with explicit data input
+r_squared_gls_manual <- function(model, data, response_var) {
+  fitted_vals <- fitted(model)
+  observed_vals <- data[[response_var]]
+  rss <- sum((observed_vals - fitted_vals)^2, na.rm = TRUE)
+  tss <- sum((observed_vals - mean(observed_vals, na.rm = TRUE))^2, na.rm = TRUE)
+  return(1 - (rss / tss))
+}
+
+# List 6 models with both data and response variables
+gls_models_6 <- list(
+  mean_early  = list(model = sub24.1_mn_model, data = sub24.1, response = "daily_mean"),
+  max_early   = list(model = sub24.1_mx_model, data = sub24.1, response = "daily_max"),
+  range_early = list(model = sub24.1_rg_model, data = sub24.1, response = "daily_range"),
+  mean_late   = list(model = sub24.2_mn_model, data = sub24.2, response = "daily_mean"),
+  max_late    = list(model = sub24.2_mx_model, data = sub24.2, response = "daily_max"),
+  range_late  = list(model = sub24.2_rg_model, data = sub24.2, response = "daily_range")
+)
+
+# Summary extraction function
+extract_gls_summary <- function(model_obj, model_name) {
+  model <- model_obj$model
+  data <- model_obj$data
+  response_var <- model_obj$response
+  coefs <- summary(model)$tTable
+  coef_names <- rownames(coefs)
+
+  # Identify temperature variable
+  temp_var <- setdiff(coef_names, c("(Intercept)", "Elevation", "SiteAreaKm2"))[1]
+
+  # Coefficient extractor
+  safe_coef <- function(var, stat) {
+    if (var %in% coef_names) coefs[var, stat] else NA
+  }
+
+  # Extract Phi (AR1 autocorrelation)
+  phi <- tryCatch(
+    coef(model$modelStruct$corStruct, unconstrained = FALSE)[1],
+    error = function(e) NA
+  )
+
+  # Calculate R² manually using supplied data
+  r2 <- r_squared_gls_manual(model, data, response_var)
+
+  # Return row
+  data.frame(
+    Model = model_name,
+    Intercept = safe_coef("(Intercept)", "Value"),
+    Intercept_p = safe_coef("(Intercept)", "p-value"),
+    Elevation = safe_coef("Elevation", "Value"),
+    Elevation_p = safe_coef("Elevation", "p-value"),
+    SiteAreaKm2 = safe_coef("SiteAreaKm2", "Value"),
+    SiteAreaKm2_p = safe_coef("SiteAreaKm2", "p-value"),
+    TempVar = temp_var,
+    TempVar_Est = safe_coef(temp_var, "Value"),
+    TempVar_p = safe_coef(temp_var, "p-value"),
+    Phi = phi,
+    Resid_SE = summary(model)$sigma,
+    AIC = AIC(model),
+    BIC = BIC(model),
+    R2 = r2
+  )
+}
+
+# Build summary table
+model_summary_6 <- bind_rows(lapply(names(gls_models_6), function(name) {
+  extract_gls_summary(gls_models_6[[name]], name)
+}))
+
+# Print and export final table
+print(model_summary_6)
+write.csv(model_summary_6, "GLS_model_summaries_with_r2.csv", row.names = FALSE)
+```
+
+**Run PERMDIST with residuals and visualize variablity**
+```{r}
+# Create response matrix with residuals
+response_resid_matrix <- as.matrix(sub24.2[, c("MeanTemp_resid", "MaxTemp_resid", "DailyRange_resid")])
+response_resid_matrix <- scale(response_resid_matrix)  
+
+# Compute Euclidean distance matrix
+dist_matrix_resid <- vegdist(response_resid_matrix, method = "euclidean")
+
+# Run PERMDISP to assess site-level temperature variability
+permdisp_resid <- betadisper(dist_matrix_resid, sub24.2$site)
+
+# Plot variability by site
+boxplot(permdisp_resid, main = "Site-Level Thermal Variability (Late Summer 2024)",
+        ylab = "Distance to Centroid", xlab = "Site")
+
+```
+
+**Perform Permutation Test to determine if sites differ significantly**
+```{r}
+# Perform permutation test to see if sites differ significantly in variability
+permdisp_test <- permutest(permdisp_resid, permutations = 999)
+
+# Print results
+print(permdisp_test)
+```
+
+**Build heatmap showing pairwise differences**
+```{r}
+# Ensure Site is a factor
+df_dispersion <- data.frame(Site = as.factor(sub24.2$site), Dispersion = permdisp_resid$distances)
+
+# Run pairwise Wilcoxon test with Bonferroni correction
+pairwise_dispersion_test <- df_dispersion %>%
+  pairwise_wilcox_test(Dispersion ~ Site, p.adjust.method = "bonferroni")
+
+# Add significance stars
+pairwise_dispersion_test <- pairwise_dispersion_test %>%
+  mutate(Significance = case_when(
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    TRUE      ~ ""
+  ))
+
+# Convert to wide matrix format for heatmap
+heatmap_matrix <- dcast(pairwise_dispersion_test, group1 ~ group2, value.var = "p")
+rownames(heatmap_matrix) <- heatmap_matrix$group1
+heatmap_matrix <- heatmap_matrix[, -1] # Remove group1 column
+
+# Fill NA values (diagonal) with 1
+heatmap_matrix[is.na(heatmap_matrix)] <- 1
+
+# Melt into long format for ggplot
+heatmap_melted <- melt(as.matrix(heatmap_matrix), na.rm = TRUE)
+colnames(heatmap_melted) <- c("Site1", "Site2", "p_value")
+
+# Add significance stars to the melted data
+heatmap_melted <- heatmap_melted %>%
+  left_join(pairwise_dispersion_test, by = c("Site1" = "group1", "Site2" = "group2"))
+
+ggplot(heatmap_melted, aes(x = Site1, y = Site2, fill = p_value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Significance), color = "black", size = 5) + 
+  scale_fill_gradient(low = "red4", high = "white", limits = c(0, 1)) +
+  labs(title = "Pairwise Site Variability Differences (Late Summer 2024)",
+       x = "Site",
+       y = "Site",
+       fill = "p-value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+*Pairwise plot (sub2)*
+```{r}
+# Prepare data
+df_dispersion <- data.frame(Site = as.factor(sub24.2$site), Dispersion = permdisp_resid$distances)
+
+pairwise_dispersion_test <- df_dispersion %>%
+  pairwise_wilcox_test(Dispersion ~ Site, p.adjust.method = "bonferroni")
+
+# Assign significance levels 
+pairwise_dispersion_test <- pairwise_dispersion_test %>%
+  mutate(significance_level = case_when(
+    p < 0.001 ~ "< 0.001",
+    p < 0.01  ~ "< 0.01",
+    p < 0.05  ~ "< 0.05",
+    TRUE      ~ NA_character_
+  ))
+
+# Create symmetric matrix of p-values
+all_sites <- sort(unique(c(pairwise_dispersion_test$group1, pairwise_dispersion_test$group2)))
+
+# Full grid for melting (to ensure upper triangle plotting)
+grid <- expand.grid(Site1 = all_sites, Site2 = all_sites) %>%
+  filter(as.character(Site1) < as.character(Site2))  # upper triangle only
+
+# Join p-values and significance
+heatmap_data <- grid %>%
+  left_join(pairwise_dispersion_test, by = c("Site1" = "group1", "Site2" = "group2"))
+
+# Plot
+ggplot(heatmap_data, aes(x = Site1, y = Site2, fill = significance_level)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(
+    values = c(
+      "< 0.001" = "#990000",
+      "< 0.01"  = "#cc4c4c",
+      "< 0.05"  = "#e6b0b0"
+    ),
+    na.value = "white",  # Non-significant = blank
+    drop = FALSE
+  ) +
+  labs(
+    title = "Pairwise Site Variability Differences (Late Summer 2024)",
+    x = "Site",
+    y = "Site",
+    fill = "p-value"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+*pairwise p-value table (sub2)*
+```{r}
+# Create a styled table
+pairwise_dispersion_test %>%
+  gt() %>%
+  tab_header(title = "Late Summer 2024 Pairwise PERMDISP p-values",
+             subtitle = "Lower values indicate significant differences") %>%
+  fmt_number(columns = everything(), decimals = 3) 
+```
+
+*Site dispersion table*
+```{r}
+# Extract PERMDISP site-level dispersion values
+site_dispersion <- data.frame(Site = permdisp_resid$group,
+                              Dispersion = permdisp_resid$distances)
+
+# Summarize by site: mean and standard deviation
+site_dispersion <- site_dispersion %>%
+  group_by(Site) %>%
+  summarise(
+    Mean_Dispersion = mean(Dispersion, na.rm = TRUE),
+    SD_Dispersion = sd(Dispersion, na.rm = TRUE)
+  )
+
+# Print the output to check
+print(site_dispersion)
+```
+
+**Combined boxplots**
+```{r}
+# Create dispersion data for Early Summer
+dist_early <- vegdist(scale(as.matrix(sub24.1[, c("MeanTemp_resid", "MaxTemp_resid", "DailyRange_resid")])), method = "euclidean")
+permdisp_early <- betadisper(dist_early, group = sub24.1$site)
+site_disp_early <- data.frame(
+  Site = sub24.1$site,
+  Distance = permdisp_early$distances,
+  Period = "Early"
+)
+
+# Create dispersion data for Late Summer
+dist_late <- vegdist(scale(as.matrix(sub24.2[, c("MeanTemp_resid", "MaxTemp_resid", "DailyRange_resid")])), method = "euclidean")
+permdisp_late <- betadisper(dist_late, group = sub24.2$site)
+site_disp_late <- data.frame(
+  Site = sub24.2$site,
+  Distance = permdisp_late$distances,
+  Period = "Late"
+)
+
+# Combine both into one dataframe
+dispersion_combined <- rbind(site_disp_early, site_disp_late)
+
+# Plot 
+p <- ggplot(dispersion_combined, aes(x = Site, y = Distance, fill = Period)) +
+  geom_boxplot(position = position_dodge(width = 0.8), linewidth = 0.4) +  
+  labs(x = "", y = "Dispersion") +
+  scale_fill_manual(values = c("Early" = "#73bfe6", "Late" = "#33a02c")) +
+  theme_minimal(base_size = 18) +
+  theme(
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 16),
+    axis.title.y = element_text(size = 18),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 16),
+    legend.key.size = unit(0.6, "cm"),      # smaller legend boxes
+    legend.key.width = unit(0.6, "cm"),
+    legend.key.height = unit(0.6, "cm"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+ggsave("dispersion_plot.png", plot = p,
+       width = 8, height = 6, dpi = 600, bg = "white")
+
+
+# High-resolution PNG with white background
+ggsave("dispersion_plot.png", plot = p,
+       width = 8, height = 6, dpi = 600, bg = "white")
+```
+

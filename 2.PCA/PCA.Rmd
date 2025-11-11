@@ -1,0 +1,162 @@
+---
+title: "PCA23_update5.9"
+output: html_document
+date: "2025-05-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+knitr::opts_knit$set(root.dir = "C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/PCA")
+```
+
+**2024 PCA**
+```{r}
+# Load and combine subperiods 
+df1 <- read_excel("Wet24PCAvars1.xlsx") %>% mutate(period = "sub_a")
+df2 <- read_excel("Wet24PCAvars2.xlsx") %>% mutate(period = "sub_b")
+combined_df <- bind_rows(df1, df2)
+
+# Define PCA on full 2024 dataset 
+full_df <- read_excel("Wet24PCAvars.xlsx")
+full_pca_data <- full_df[, c("Mean", "Max", "Range", "Sensitivity")]
+full_scaled <- scale(full_pca_data)
+pca_result <- princomp(full_scaled, cor = TRUE)
+
+expl_var_2024 <- round(100 * pca_result$sdev^2 / sum(pca_result$sdev^2), 1)
+
+# Project subperiods into full PCA space 
+scaling_center <- attr(full_scaled, "scaled:center")
+scaling_scale <- attr(full_scaled, "scaled:scale")
+
+sub_a_scaled <- scale(df1[, c("Mean", "Max", "Range", "Sensitivity")],
+                      center = scaling_center, scale = scaling_scale)
+sub_b_scaled <- scale(df2[, c("Mean", "Max", "Range", "Sensitivity")],
+                      center = scaling_center, scale = scaling_scale)
+
+sub_a_scores <- as.data.frame(sub_a_scaled %*% pca_result$loadings[, 1:2])
+sub_b_scores <- as.data.frame(sub_b_scaled %*% pca_result$loadings[, 1:2])
+colnames(sub_a_scores) <- colnames(sub_b_scores) <- c("Comp.1", "Comp.2")
+
+sub_a_scores <- bind_cols(sub_a_scores, df1)
+sub_b_scores <- bind_cols(sub_b_scores, df2)
+
+pca_scores <- bind_rows(sub_a_scores, sub_b_scores)
+pca_scores$period <- factor(pca_scores$period, levels = c("sub_a", "sub_b"))
+pca_scores$label_num <- paste0(pca_scores$type_no,
+                               ifelse(pca_scores$period == "sub_a", "a", "b"))
+
+# Compute centroids 
+centroids <- pca_scores %>%
+  group_by(site_name, period) %>%
+  summarize(Comp.1 = mean(Comp.1), Comp.2 = mean(Comp.2), .groups = "drop")
+centroids$period <- factor(centroids$period, levels = c("sub_a", "sub_b"))
+
+# Attach centroid coordinates to points
+pca_scores$key <- paste(pca_scores$site_name, pca_scores$period)
+centroids$key <- paste(centroids$site_name, centroids$period)
+pca_scores <- pca_scores %>%
+  left_join(centroids[, c("key", "Comp.1", "Comp.2")],
+            by = "key", suffix = c("", "_centroid"))
+
+# PCA loadings (from full dataset PCA) 
+loadings <- as.data.frame(pca_result$loadings[, 1:2]) %>%
+  mutate(varname = rownames(.),
+         PC1 = Comp.1 * 3,
+         PC2 = Comp.2 * 3)
+
+# Define color and shape schemes 
+site_names <- unique(pca_scores$site_name)
+color_map <- setNames(brewer.pal(min(12, length(site_names)), "Set3"), site_names)
+color_map["Butte"] <- "#DAB6FC"
+shape_values <- c("sub_a" = 21, "sub_b" = 24)
+
+# Full dataset PCA scores and centroids for separate plot 
+full_scores <- as.data.frame(pca_result$scores[, 1:2]) %>%
+  bind_cols(full_df)
+full_centroids <- full_scores %>%
+  group_by(site_name) %>%
+  summarize(Centroid_PC1 = mean(Comp.1),
+            Centroid_PC2 = mean(Comp.2), .groups = "drop")
+
+full_scores <- full_scores %>%
+  left_join(full_centroids, by = "site_name")
+
+# Plot for full dataset (July 1 - Aug 12) 
+plot_full <- ggplot(full_scores, aes(x = Comp.1, y = Comp.2)) +
+  geom_segment(aes(xend = Centroid_PC1, yend = Centroid_PC2, color = site_name),
+               linetype = "dashed", linewidth = 0.8, alpha = 0.6) +
+  geom_text(aes(label = type_no, color = site_name),
+            size = 4, fontface = "bold", show.legend = FALSE) +
+  geom_point(data = full_centroids,
+             aes(x = Centroid_PC1, y = Centroid_PC2, fill = site_name),
+             shape = 21, color = "black", size = 4.5, stroke = 0.6, inherit.aes = FALSE) +
+  geom_segment(data = loadings,
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.25, "cm")), color = "black") +
+  geom_text(data = loadings,
+            aes(x = PC1, y = PC2, label = varname),
+            color = "black", vjust = -0.8) +
+  geom_point(data = full_centroids,
+             aes(x = Inf, y = Inf, color = site_name),
+             shape = 15, size = 5, show.legend = TRUE, inherit.aes = FALSE) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = color_map) +
+  guides(
+    fill = "none",
+    color = guide_legend(override.aes = list(shape = 15, size = 5))
+  ) +
+  theme_minimal() +
+  labs(title = "2024 PCA (Full Dataset)",
+       x = paste0("PC1 (", expl_var_2024[1], "%)"),
+  y = paste0("PC2 (", expl_var_2024[2], "%)"), color = "Site Name") +
+  theme(legend.position = "right")
+
+# Plot for subperiods using same PCA 
+plot_subperiods <- ggplot(pca_scores, aes(x = Comp.1, y = Comp.2)) +
+  geom_segment(aes(xend = Comp.1_centroid, yend = Comp.2_centroid, color = site_name),
+               linetype = "dotted", linewidth = 0.8, alpha = 0.6) +
+  geom_text(aes(label = label_num, color = site_name),
+            size = 4, fontface = "bold", show.legend = FALSE) +
+  geom_point(data = centroids,
+             aes(x = Comp.1, y = Comp.2, fill = site_name, shape = period),
+             color = "black", size = 4.5, stroke = 0.6) +
+  geom_segment(data = loadings,
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+  geom_text(data = loadings,
+            aes(x = PC1, y = PC2, label = varname),
+            color = "black", vjust = -0.8) +
+  geom_point(data = centroids,
+             aes(x = Inf, y = Inf, color = site_name),
+             shape = 15, size = 5, show.legend = TRUE, inherit.aes = FALSE) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = color_map) +
+  scale_shape_manual(values = shape_values) +
+  guides(
+    fill = "none",
+    color = guide_legend(override.aes = list(shape = 15, size = 5)),
+    shape = guide_legend(override.aes = list(size = 4))
+  ) +
+  theme_minimal() +
+  labs(title = "2024 PCA with Subperiod Projection",
+  x = paste0("PC1 (", expl_var_2024[1], "%)"),
+  y = paste0("PC2 (", expl_var_2024[2], "%)")
+)
+
+# Display both plots
+print(plot_full)
+print(plot_subperiods)
+
+ggsave("pca_plot.png", plot = plot_subperiods,
+       width = 8, height = 5, dpi = 600, bg = "white")
+```
+
+

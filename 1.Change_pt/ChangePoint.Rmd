@@ -1,0 +1,134 @@
+---
+title: "ChangePoint24"
+author: "Michael Krochta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(zoo)
+library(strucchange)
+knitr::opts_knit$set(root.dir = "C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/Change_pt")
+```
+
+**EXTRACTING HOURLY OUTLET DATA AND TRIMMING TO COMMON TIME PERIOD**
+```{r}
+# Set your folder path
+folder_path <- "C:/Users/mbkro/OneDrive/Documents/Krochta_JFE/Change_pt/Outlets24"  
+
+# List all Excel files in the folder
+file_list <- list.files(path = folder_path, pattern = "\\.xlsx$", full.names = TRUE)
+
+# Function to read and convert to hourly
+process_file <- function(file_path) {
+  df <- read_excel(file_path)
+  df <- df %>%
+    mutate(DateTime = ymd_hms(DateTime)) %>%
+    group_by(hour = floor_date(DateTime, unit = "hour")) %>%
+    summarise(TempC = mean(TempC, na.rm = TRUE), .groups = "drop") %>%
+    rename(DateTime = hour)
+  
+  # Add site name from filename
+  site <- tools::file_path_sans_ext(basename(file_path))
+  df <- df %>% mutate(Site = site)
+  return(df)
+}
+
+# Apply to all files
+all_data <- map_dfr(file_list, process_file)
+
+# Spread to wide format
+wide_data <- all_data %>%
+  dplyr::select(DateTime, Site, TempC) %>%
+  tidyr::pivot_wider(names_from = Site, values_from = TempC)
+
+# Trim to dates where all sites have data
+trimmed_data <- wide_data %>%
+  filter(if_all(-DateTime, ~ !is.na(.)))
+
+# Check the trimmed range
+range(trimmed_data$DateTime)
+
+# View the first few rows
+head(trimmed_data)
+```
+
+*CONVERT TO Z-SCORES AND FIND MEAN FOR EACH HOUR*
+```{r}
+# Convert to long format
+z_long <- trimmed_data %>%
+  pivot_longer(-DateTime, names_to = "Site", values_to = "TempC") %>%
+  group_by(Site) %>%
+  mutate(z_score = scale(TempC)) %>%
+  ungroup()
+
+# Average across all sites per hour
+mean_z_by_hour <- z_long %>%
+  group_by(DateTime) %>%
+  summarise(mean_z = mean(z_score, na.rm = TRUE), .groups = "drop")
+
+# Add a 24-hour rolling mean (change 'k' as needed)
+mean_z_by_hour$rollmean_72hr <- rollmean(mean_z_by_hour$mean_z, k = 72, fill = NA, align = "center")
+```
+
+*Get breakpoints*
+```{r}
+# Build time series data
+roll_df <- na.omit(mean_z_by_hour %>% dplyr::select(DateTime, rollmean_72hr))
+roll_df$time <- 1:nrow(roll_df)
+
+# Fit multiple breakpoint model
+bp_model <- breakpoints(rollmean_72hr ~ time, data = roll_df)
+
+# Choose best number of breakpoints based on BIC
+summary(bp_model)
+
+# Get breakpoint locations
+bp_model$breakpoints
+
+break_dates <- roll_df$DateTime[bp_model$breakpoints]
+print(break_dates)
+```
+
+*Extract and plot break point dates*
+```{r}
+# Extract breakpoint dates
+break_dates <- roll_df$DateTime[bp_model$breakpoints]
+
+# Base plot
+ggplot(mean_z_by_hour, aes(x = DateTime)) +
+  geom_line(aes(y = mean_z), color = "steelblue", alpha = 0.3) +
+  geom_line(aes(y = rollmean_72hr), color = "firebrick", size = 1) +
+  geom_vline(xintercept = as.numeric(break_dates), color = "blue", linetype = "dashed") +
+  labs(
+    title = "Mean Z-Score of Outlet Temperatures with Breakpoints",
+    subtitle = "Breakpoints detected using strucchange::breakpoints()",
+    x = "Date",
+    y = "Mean Z-Score"
+  ) +
+  theme_minimal()
+
+# Plot with only the third breakpoint
+ggplot(mean_z_by_hour, aes(x = DateTime)) +
+  geom_line(aes(y = mean_z), color = "steelblue", alpha = 0.3) +
+  geom_line(aes(y = rollmean_72hr), color = "firebrick", size = 1) +
+  geom_vline(xintercept = as.numeric(break_dates[2]), color = "blue", linetype = "dashed") +
+  labs(
+    title = "Mean Z-Score of Outlet Temperatures with Breakpoint",
+    subtitle = "Middle breakpoint detected using strucchange::breakpoints()",
+    x = "Date",
+    y = "Mean Z-Score"
+  ) +
+  theme_minimal()
+```
+
